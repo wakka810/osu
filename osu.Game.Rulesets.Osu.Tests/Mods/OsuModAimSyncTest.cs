@@ -3,12 +3,21 @@
 
 using NUnit.Framework;
 using osu.Game.Rulesets.Osu.Mods;
+using osu.Game.Rulesets.Osu.Objects.Drawables;
 
 namespace osu.Game.Rulesets.Osu.Tests.Mods
 {
     [TestFixture]
     public class OsuModAimSyncTest
     {
+
+        [Test]
+        public void TestUnappliedPooledDrawableIsNotCurrent()
+        {
+            var circle = new DrawableHitCircle();
+            Assert.That(OsuModAimSync.IsCurrentHitObject(circle, null), Is.False);
+        }
+
         [TestCase(0, 25.5, true, true, 15, 15, 0)]
         [TestCase(26, 25.5, true, true, 30, 15, 1)]
         [TestCase(0, 25.5, false, true, 0, 15, 3)]

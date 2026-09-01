@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using osu.Framework.Bindables;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Sprites;
@@ -91,8 +90,17 @@ namespace osu.Game.Rulesets.Osu.Mods
 
         public void ApplyToDrawableHitObject(DrawableHitObject drawable)
         {
-            if (drawable is DrawableHitCircle circle)
-                circles.TryAdd(circle, new CircleState(circle));
+            if (drawable is not DrawableHitCircle circle)
+                return;
+
+            if (!circles.TryGetValue(circle, out CircleState? state))
+            {
+                state = new CircleState(circle);
+                circles.Add(circle, state);
+                circle.HitObjectApplied += _ => state.Reset();
+            }
+
+            state.Reset();
         }
 
         public void Update(Playfield playfield)
@@ -101,7 +109,7 @@ namespace osu.Game.Rulesets.Osu.Mods
 
             foreach (CircleState state in circles.Values)
             {
-                if (state.Circle.Judged)
+                if (!state.IsCurrent || state.Circle.Judged)
                 {
                     state.HoverStart = null;
                     continue;
@@ -133,11 +141,14 @@ namespace osu.Game.Rulesets.Osu.Mods
             if (candidate == null || !shouldApply(candidate))
                 return false;
 
-            var hitWindows = candidate.Circle.HitObject.HitWindows;
+            if (!candidate.IsCurrent || candidate.HitObject == null)
+                return false;
+
+            var hitWindows = candidate.HitObject.HitWindows;
             if (hitWindows == null)
                 return false;
 
-            double hitError = time - candidate.Circle.HitObject.StartTime;
+            double hitError = time - candidate.HitObject.StartTime;
             double greatWindow = hitWindows.WindowFor(HitResult.Great);
             double timingWindow = TimingTolerance.Value <= 0
                 ? greatWindow
@@ -163,7 +174,7 @@ namespace osu.Game.Rulesets.Osu.Mods
             ruleset.Cursor.FlashColour(colourFor(failure), 350, Easing.OutQuint);
 
             Logger.Log(
-                $"Aim Sync miss ({failure}): object={candidate.Circle.HitObject.StartTime:0.##}ms error={hitError:+0.##;-0.##;0}ms latch={hoverDuration:0.##}/{LatchDuration.Value:0.##}ms",
+                $"Aim Sync miss ({failure}): object={candidate.HitObject.StartTime:0.##}ms error={hitError:+0.##;-0.##;0}ms latch={hoverDuration:0.##}/{LatchDuration.Value:0.##}ms",
                 LoggingTarget.Runtime,
                 LogLevel.Debug);
 
@@ -178,18 +189,18 @@ namespace osu.Game.Rulesets.Osu.Mods
 
             foreach (CircleState state in circles.Values)
             {
-                if (state.Circle.Judged || state.Circle.HitObject.HitWindows == null)
+                if (!state.IsCurrent || state.Circle.Judged || state.HitObject?.HitWindows == null)
                     continue;
 
-                double hitError = time - state.Circle.HitObject.StartTime;
-                double candidateWindow = state.Circle.HitObject.HitWindows.WindowFor(HitResult.Meh);
+                double hitError = time - state.HitObject.StartTime;
+                double candidateWindow = state.HitObject.HitWindows.WindowFor(HitResult.Meh);
                 double distance = Math.Abs(hitError);
 
                 if (distance > candidateWindow)
                     continue;
 
                 if (distance < bestDistance ||
-                    (Math.Abs(distance - bestDistance) < 0.001 && best != null && state.Circle.HitObject.StartTime < best.Circle.HitObject.StartTime))
+                    (Math.Abs(distance - bestDistance) < 0.001 && best?.HitObject != null && state.HitObject.StartTime < best.HitObject.StartTime))
                 {
                     best = state;
                     bestDistance = distance;
@@ -201,24 +212,36 @@ namespace osu.Game.Rulesets.Osu.Mods
 
         private bool shouldApply(CircleState current)
         {
+            if (!current.IsCurrent || current.HitObject == null)
+                return false;
+
             if (!OnlyJumps.Value)
                 return true;
 
-            CircleState? previous = circles.Values
-                                          .Where(state => state.Circle.HitObject.StartTime < current.Circle.HitObject.StartTime)
-                                          .OrderByDescending(state => state.Circle.HitObject.StartTime)
-                                          .FirstOrDefault();
+            CircleState? previous = null;
 
-            if (previous == null)
+            foreach (CircleState state in circles.Values)
+            {
+                if (!state.IsCurrent || state.HitObject == null || state.HitObject.StartTime >= current.HitObject.StartTime)
+                    continue;
+
+                if (previous?.HitObject == null || state.HitObject.StartTime > previous.HitObject.StartTime)
+                    previous = state;
+            }
+
+            if (previous?.HitObject == null)
                 return false;
 
-            double interval = current.Circle.HitObject.StartTime - previous.Circle.HitObject.StartTime;
+            double interval = current.HitObject.StartTime - previous.HitObject.StartTime;
             if (interval <= 0 || interval > MaximumJumpInterval.Value)
                 return false;
 
-            double distance = Vector2.Distance(previous.Circle.HitObject.StackedPosition, current.Circle.HitObject.StackedPosition);
+            double distance = Vector2.Distance(previous.HitObject.StackedPosition, current.HitObject.StackedPosition);
             return distance >= MinimumJumpDistance.Value;
         }
+
+        internal static bool IsCurrentHitObject(DrawableHitCircle circle, OsuHitObject? hitObject)
+            => hitObject != null && ReferenceEquals(((DrawableHitObject)circle).HitObject, hitObject);
 
         internal static AimSyncFailure EvaluateAttempt(
             double hitError,
@@ -271,12 +294,22 @@ namespace osu.Game.Rulesets.Osu.Mods
         {
             public readonly DrawableHitCircle Circle;
 
+            public OsuHitObject? HitObject { get; private set; }
+            public bool IsCurrent => IsCurrentHitObject(Circle, HitObject);
+
             public double? HoverStart;
             public bool EverHovered;
 
             public CircleState(DrawableHitCircle circle)
             {
                 Circle = circle;
+            }
+
+            public void Reset()
+            {
+                HitObject = ((DrawableHitObject)Circle).HitObject as OsuHitObject;
+                HoverStart = null;
+                EverHovered = false;
             }
         }
 
