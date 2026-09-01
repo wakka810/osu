@@ -19,6 +19,7 @@ using osu.Game.Rulesets.Osu.Objects.Drawables;
 using osu.Game.Rulesets.Osu.UI;
 using osu.Game.Rulesets.Scoring;
 using osu.Game.Rulesets.UI;
+using osu.Game.Screens.Play;
 using osuTK;
 using osuTK.Graphics;
 
@@ -41,7 +42,10 @@ namespace osu.Game.Rulesets.Osu.Mods
             typeof(OsuModCinema),
         };
 
-        [SettingSource("Latch duration", "How long the cursor must continuously remain inside the circle immediately before tapping.", 0)]
+        [SettingSource("Latch mode", "Use a fixed latch duration or adapt it to jump density, spacing, and circle size.", 0)]
+        public Bindable<LatchMode> LatchModeSetting { get; } = new Bindable<LatchMode>(LatchMode.Fixed);
+
+        [SettingSource("Latch duration", "Fixed mode: how long the cursor must continuously remain inside the circle immediately before tapping.", 1)]
         public BindableDouble LatchDuration { get; } = new BindableDouble(15)
         {
             MinValue = 0,
@@ -49,7 +53,18 @@ namespace osu.Game.Rulesets.Osu.Mods
             Precision = 1,
         };
 
-        [SettingSource("Timing tolerance", "Maximum absolute tap error in milliseconds. 0 uses the map's 300 window; larger values are clamped to it.", 1)]
+        [SettingSource("Adaptive allowance", "Adaptive mode: permitted shortfall from the predicted top-player latch, in the selected unit.", 2)]
+        public BindableDouble AdaptiveAllowance { get; } = new BindableDouble(0)
+        {
+            MinValue = 0,
+            MaxValue = 100,
+            Precision = 1,
+        };
+
+        [SettingSource("Allowance unit", "Choose whether the adaptive allowance is subtracted as real milliseconds or as a percentage.", 3)]
+        public Bindable<AllowanceUnit> AdaptiveAllowanceUnit { get; } = new Bindable<AllowanceUnit>(AllowanceUnit.Milliseconds);
+
+        [SettingSource("Timing tolerance", "Maximum absolute tap error in milliseconds. 0 uses the map's 300 window; larger values are clamped to it.", 4)]
         public BindableDouble TimingTolerance { get; } = new BindableDouble(0)
         {
             MinValue = 0,
@@ -57,10 +72,10 @@ namespace osu.Game.Rulesets.Osu.Mods
             Precision = 1,
         };
 
-        [SettingSource("Only jumps", "Only enforce Aim Sync on jumps rather than every circle and slider head.", 2)]
+        [SettingSource("Only jumps", "Only enforce Aim Sync on jumps rather than every circle and slider head.", 5)]
         public BindableBool OnlyJumps { get; } = new BindableBool(true);
 
-        [SettingSource("Minimum jump distance", "Minimum spacing in osu! pixels for a transition to count as a jump.", 3)]
+        [SettingSource("Minimum jump distance", "Minimum spacing in osu! pixels for a transition to count as a jump.", 6)]
         public BindableDouble MinimumJumpDistance { get; } = new BindableDouble(100)
         {
             MinValue = 0,
@@ -68,7 +83,7 @@ namespace osu.Game.Rulesets.Osu.Mods
             Precision = 5,
         };
 
-        [SettingSource("Maximum jump interval", "Maximum time from the previous circle or slider head for a transition to count as a jump.", 4)]
+        [SettingSource("Maximum jump interval", "Maximum time from the previous circle or slider head for a transition to count as a jump.", 7)]
         public BindableDouble MaximumJumpInterval { get; } = new BindableDouble(200)
         {
             MinValue = 50,
@@ -138,7 +153,11 @@ namespace osu.Game.Rulesets.Osu.Mods
             double time = gameplayClock.CurrentTime;
             CircleState? candidate = findCandidate(time);
 
-            if (candidate == null || !shouldApply(candidate))
+            if (candidate == null)
+                return false;
+
+            CircleState? previous = findPrevious(candidate);
+            if (!shouldApply(candidate, previous))
                 return false;
 
             if (!candidate.IsCurrent || candidate.HitObject == null)
@@ -159,13 +178,15 @@ namespace osu.Game.Rulesets.Osu.Mods
                 ? Math.Max(0, time - candidate.HoverStart.Value)
                 : 0;
 
+            double requiredLatchDuration = getRequiredLatchDuration(candidate, previous);
+
             AimSyncFailure failure = EvaluateAttempt(
                 hitError,
                 timingWindow,
                 isHovered,
                 candidate.EverHovered,
                 hoverDuration,
-                LatchDuration.Value);
+                requiredLatchDuration);
 
             if (failure == AimSyncFailure.None)
                 return false;
@@ -174,7 +195,7 @@ namespace osu.Game.Rulesets.Osu.Mods
             ruleset.Cursor.FlashColour(colourFor(failure), 350, Easing.OutQuint);
 
             Logger.Log(
-                $"Aim Sync miss ({failure}): object={candidate.HitObject.StartTime:0.##}ms error={hitError:+0.##;-0.##;0}ms latch={hoverDuration:0.##}/{LatchDuration.Value:0.##}ms",
+                $"Aim Sync miss ({failure}): object={candidate.HitObject.StartTime:0.##}ms error={hitError:+0.##;-0.##;0}ms latch={hoverDuration:0.##}/{requiredLatchDuration:0.##}ms mode={LatchModeSetting.Value}",
                 LoggingTarget.Runtime,
                 LogLevel.Debug);
 
@@ -210,13 +231,10 @@ namespace osu.Game.Rulesets.Osu.Mods
             return best;
         }
 
-        private bool shouldApply(CircleState current)
+        private CircleState? findPrevious(CircleState current)
         {
             if (!current.IsCurrent || current.HitObject == null)
-                return false;
-
-            if (!OnlyJumps.Value)
-                return true;
+                return null;
 
             CircleState? previous = null;
 
@@ -229,6 +247,17 @@ namespace osu.Game.Rulesets.Osu.Mods
                     previous = state;
             }
 
+            return previous;
+        }
+
+        private bool shouldApply(CircleState current, CircleState? previous)
+        {
+            if (!current.IsCurrent || current.HitObject == null)
+                return false;
+
+            if (!OnlyJumps.Value)
+                return true;
+
             if (previous?.HitObject == null)
                 return false;
 
@@ -238,6 +267,49 @@ namespace osu.Game.Rulesets.Osu.Mods
 
             double distance = Vector2.Distance(previous.HitObject.StackedPosition, current.HitObject.StackedPosition);
             return distance >= MinimumJumpDistance.Value;
+        }
+
+        private double getRequiredLatchDuration(CircleState current, CircleState? previous)
+        {
+            if (LatchModeSetting.Value != LatchMode.Adaptive || current.HitObject == null || previous?.HitObject == null)
+                return LatchDuration.Value;
+
+            double interval = current.HitObject.StartTime - previous.HitObject.StartTime;
+            double distance = Vector2.Distance(previous.HitObject.StackedPosition, current.HitObject.StackedPosition);
+            double gameplayRate = Math.Abs(gameplayClock.GetTrueGameplayRate());
+
+            return CalculateAdaptiveLatchDuration(
+                interval,
+                distance,
+                current.HitObject.Radius,
+                gameplayRate,
+                AdaptiveAllowance.Value,
+                AdaptiveAllowanceUnit.Value);
+        }
+
+        internal static double CalculateAdaptiveLatchDuration(
+            double gameplayInterval,
+            double distance,
+            double radius,
+            double gameplayRate,
+            double allowance,
+            AllowanceUnit allowanceUnit)
+        {
+            const double intercept = 30.829006841775623;
+            const double intervalCoefficient = 0.28745011043864593;
+            const double difficultyCoefficient = -16.20043415847044;
+
+            double rate = Math.Max(0.01, Math.Abs(gameplayRate));
+            double realInterval = gameplayInterval / rate;
+            double indexOfDifficulty = Math.Log2(1 + Math.Max(0, distance) / (2 * Math.Max(0.01, radius)));
+            double predictedRealLatch = Math.Max(0, intercept + intervalCoefficient * realInterval + difficultyCoefficient * indexOfDifficulty);
+
+            double requiredRealLatch = allowanceUnit == AllowanceUnit.Percent
+                ? predictedRealLatch * (1 - Math.Clamp(allowance, 0, 100) / 100)
+                : predictedRealLatch - Math.Max(0, allowance);
+
+            // Hover duration is measured on the gameplay clock, so convert the real-time model back to gameplay-clock milliseconds.
+            return Math.Max(0, requiredRealLatch) * rate;
         }
 
         internal static bool IsCurrentHitObject(DrawableHitCircle circle, OsuHitObject? hitObject)
@@ -279,6 +351,18 @@ namespace osu.Game.Rulesets.Osu.Mods
                 default:
                     return Colour4.Violet;
             }
+        }
+
+        public enum LatchMode
+        {
+            Fixed,
+            Adaptive,
+        }
+
+        public enum AllowanceUnit
+        {
+            Milliseconds,
+            Percent,
         }
 
         internal enum AimSyncFailure
