@@ -93,13 +93,13 @@ namespace osu.Game.Rulesets.Osu.Mods
                 switch (h)
                 {
                     case DrawableHitCircle circle:
-                        handleHitCircle(circle);
+                        requiresHit |= CanHitCircle(circle, time);
                         break;
 
                     case DrawableSlider slider:
                         // Handles cases like "2B" beatmaps, where sliders may be overlapping and simply holding is not enough.
                         if (!slider.HeadCircle.IsHit)
-                            handleHitCircle(slider.HeadCircle);
+                            requiresHit |= CanHitCircle(slider.HeadCircle, time);
 
                         requiresHold |= slider.SliderInputManager.IsMouseInFollowArea(slider.Tracking.Value);
                         break;
@@ -120,15 +120,6 @@ namespace osu.Game.Rulesets.Osu.Mods
                 changeState(true);
             else if (isDownState && time - lastStateChangeTime > AutoGenerator.KEY_UP_DELAY)
                 changeState(false);
-
-            void handleHitCircle(DrawableHitCircle circle)
-            {
-                if (!circle.HitArea.IsHovered)
-                    return;
-
-                Debug.Assert(circle.HitObject.HitWindows != null);
-                requiresHit |= circle.HitObject.HitWindows.CanBeHit(time - circle.HitObject.StartTime);
-            }
 
             void changeState(bool down)
             {
@@ -153,6 +144,15 @@ namespace osu.Game.Rulesets.Osu.Mods
                     pressHandler.HandleRelease(wasLeft);
                 }
             }
+        }
+
+        protected virtual bool CanHitCircle(DrawableHitCircle circle, double time)
+        {
+            if (!circle.HitArea.IsHovered)
+                return false;
+
+            Debug.Assert(circle.HitObject.HitWindows != null);
+            return circle.HitObject.HitWindows.CanBeHit(time - circle.HitObject.StartTime);
         }
 
         private interface IPressHandler
